@@ -57,8 +57,8 @@
 
 #define PLOT        1       // 1 = stream plotter data, 0 = silent
 
-#define SDA_PIN     21
-#define SCL_PIN     22
+#define SDA_PIN     22
+#define SCL_PIN     21
 
 // ---- LED strip ----
 #define STRIP_PIN   23     // WS2812 data (NOTE: 34/35/36/39 are input-only!)

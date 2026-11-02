@@ -1,5 +1,5 @@
 /*
- * WS2812 (NeoPixel) Wi-Fi control - data pin GPIO 23, up to 181 LEDs
+ * WS2812 (NeoPixel) Wi-Fi control - 3 channels on GPIO 16, 17, 18, up to 181 LEDs each
  *
  * The ESP32 creates ITS OWN Wi-Fi network (no router needed) and hosts
  * the control webpage itself, with a captive portal:
@@ -8,10 +8,15 @@
  *   2) The control page pops up automatically (captive portal),
  *      or browse to  http://192.168.4.1
  *
- * Libraries: Adafruit NeoPixel (Library Manager).
+ * Target: ESP32-WROOM-32D / classic ESP32, Arduino-ESP32 3.x.
+ * Libraries: Adafruit NeoPixel (pixel storage/color math only, no transmission).
+ * Output: three persistent native ESP-IDF RMT transmitters.
  *            WiFi / WebServer / DNSServer are built into the ESP32 core.
  *
  * Serial Monitor @ 115200 still works with the same commands. Type help.
+ *
+ * Select a serial channel with: channel 1 / channel 2 / channel 3
+ * The webpage has a separate control panel for each strip.
  *
  * --- Basic commands ---
  *   color R G B / led I R G B / fill NAME / bright N
@@ -34,8 +39,11 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Adafruit_NeoPixel.h>
+#include "IndependentRmtOutput.h"
 
-#define LED_PIN     4
+constexpr int CHANNEL_COUNT = 3;
+const uint8_t CHANNEL_PINS[CHANNEL_COUNT] = {16, 17, 18};
+const char* FIRMWARE_VERSION = "3ch-rmt-2";
 #define MAX_LEDS    181
 #define COLOR_ORDER NEO_GRB     // swap to NEO_RGB if colors look wrong
 
@@ -43,11 +51,46 @@
 const char* AP_SSID = "ESP32-LEDs";
 const char* AP_PASS = "simonkaplinsky";        // "" = open network. Or set 8+ chars for WPA2.
 
-Adafruit_NeoPixel strip(MAX_LEDS, LED_PIN, COLOR_ORDER + NEO_KHZ800);
 WebServer server(80);
 DNSServer dnsServer;
 const byte DNS_PORT = 53;
 IPAddress apIP(192, 168, 4, 1);
+
+// ---------- helpers ----------
+// When a web request is being handled, replies are also captured here
+// and returned as the HTTP response body.
+String* webReply = nullptr;
+
+void reply(const String& s) {
+  Serial.println(s);
+  if (webReply) { *webReply += s; *webReply += '\n'; }
+}
+
+// Each channel owns its pixels, animation timing, and script.
+class LedChannel {
+public:
+  Adafruit_NeoPixel strip;
+  IndependentRmtOutput<MAX_LEDS> output;
+  uint8_t number;
+  uint8_t pin;
+
+  LedChannel(uint8_t channelNumber, uint8_t dataPin)
+    : strip(MAX_LEDS, -1, COLOR_ORDER + NEO_KHZ800),
+      number(channelNumber), pin(dataPin) {}
+
+  void showStrip() {
+    output.markDirty();
+  }
+
+  void begin() {
+    // NeoPixel is only an in-memory pixel buffer: never begin/show/setPin it.
+    if (!output.begin(pin)) {
+      reply("ERR: RMT init GPIO " + String(pin) + ": " + esp_err_to_name(output.error()));
+    }
+    strip.setBrightness(60);
+    strip.clear();
+    showStrip();
+  }
 
 // ---- strip state ----
 int      activeLeds = MAX_LEDS;
@@ -73,20 +116,10 @@ long     scriptLoops = 0;     // 0 = infinite, >0 = remaining, -1 = none
 bool     scriptRunning = false;
 unsigned long scriptWaitUntil = 0;
 
-// ---------- helpers ----------
-// When a web request is being handled, replies are also captured here
-// and returned as the HTTP response body.
-String* webReply = nullptr;
-
-void reply(const String& s) {
-  Serial.println(s);
-  if (webReply) { *webReply += s; *webReply += '\n'; }
-}
-
 void showAll(uint32_t c) {
   for (int i = 0; i < activeLeds; i++) strip.setPixelColor(i, c);
   for (int i = activeLeds; i < MAX_LEDS; i++) strip.setPixelColor(i, 0);
-  strip.show();
+  showStrip();
   if (c != 0) { lastColor = c; ledsOn = true; } else ledsOn = false;
 }
 
@@ -127,12 +160,12 @@ void runPatterns() {
       uint16_t hue = rainbowHue + (i * 65536L / activeLeds);
       strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(hue)));
     }
-    strip.show();
+    showStrip();
     rainbowHue += 256; ledsOn = true;
 
   } else if (mode == M_WIPE) {
     strip.setPixelColor(pIndex, strip.Color(pr, pg, pb));
-    strip.show();
+    showStrip();
     ledsOn = true;
     pIndex += travel;
     if (pIndex >= activeLeds || pIndex < 0) { mode = M_STATIC; }  // one pass then hold
@@ -140,7 +173,7 @@ void runPatterns() {
   } else if (mode == M_CHASE) {
     for (int i = 0; i < activeLeds; i++) strip.setPixelColor(i, 0);
     strip.setPixelColor(pIndex, strip.Color(pr, pg, pb));
-    strip.show();
+    showStrip();
     ledsOn = true;
     pIndex += travel;
     if (pIndex >= activeLeds) pIndex = 0;
@@ -151,7 +184,7 @@ void runPatterns() {
     float s = pIndex / 255.0;
     for (int i = 0; i < activeLeds; i++)
       strip.setPixelColor(i, strip.Color(pr * s, pg * s, pb * s));
-    strip.show();
+    showStrip();
     ledsOn = true;
     pIndex += pDir * 8;
     if (pIndex >= 255) { pIndex = 255; pDir = -1; }
@@ -162,7 +195,6 @@ void runPatterns() {
 // ---------- script engine ----------
 void stopScript() { scriptRunning = false; scriptCount = 0; scriptPos = 0; }
 
-void handleCommand(String line);  // fwd decl
 
 void startScript(String body) {
   stopScript();
@@ -213,6 +245,7 @@ void runScript() {
 }
 
 void printHelp() {
+  reply(F("Serial selection: channel 1|2|3 (GPIO 16|17|18)"));
   reply(F("cmds: color R G B | led I R G B | fill NAME | bright N"));
   reply(F("      on | off | clear | toggle | count N | status | help"));
   reply(F("patterns: pulse|wipe|chase R G B [MS] | rainbow | stop"));
@@ -222,7 +255,12 @@ void printHelp() {
 }
 
 void printStatus() {
-  String s = "brightness=" + String(strip.getBrightness());
+  String s = "channel=" + String(number) + " pin=" + String(pin);
+  s += " fw=" + String(FIRMWARE_VERSION);
+  s += " driver=dedicated-rmt tx=" + String(output.ready() ? "ready" : "error");
+  s += " tx_error=" + String(esp_err_to_name(output.error()));
+  s += " frames=" + String(output.frames());
+  s += " brightness=" + String(strip.getBrightness());
   s += " active_leds=" + String(activeLeds);
   const char* mn[] = {"static","rainbow","pulse","wipe","chase"};
   s += " mode=" + String(mn[mode]);
@@ -232,6 +270,19 @@ void printStatus() {
   s += " power=" + String(ledsOn ? "on" : "off");
   s += " clients=" + String(WiFi.softAPgetStationNum());
   reply(s);
+}
+
+// External commands take over this strip; script steps use handleCommand directly.
+void handleManualCommand(String line) {
+  line.trim();
+  String cmd = line.substring(0, line.indexOf(' ') < 0 ? line.length() : line.indexOf(' '));
+  cmd.toLowerCase();
+  if (cmd == "on" || cmd == "off" || cmd == "clear" || cmd == "toggle" ||
+      cmd == "fill" || cmd == "color" || cmd == "led" || cmd == "pulse" ||
+      cmd == "wipe" || cmd == "chase" || cmd == "rainbow" || cmd == "stop") {
+    stopScript();
+  }
+  handleCommand(line);
 }
 
 // ---------- main command handler ----------
@@ -248,17 +299,20 @@ void handleCommand(String line) {
   else if (cmd == "status")     { printStatus(); }
   else if (cmd == "off" || cmd == "clear") { mode = M_STATIC; showAll(0); reply("OK: off"); }
   else if (cmd == "on")         { mode = M_STATIC; showAll(lastColor); reply("OK: on"); }
-  else if (cmd == "toggle")     { mode = M_STATIC; showAll(ledsOn ? 0 : lastColor); reply(ledsOn ? "OK: off" : "OK: on"); }
+  else if (cmd == "toggle")     { mode = M_STATIC; showAll(ledsOn ? 0 : lastColor); reply(ledsOn ? "OK: on" : "OK: off"); }
   else if (cmd == "stop")       { mode = M_STATIC; stopScript(); reply("OK: stopped"); }
   else if (cmd == "rainbow")    { startPattern(M_RAINBOW,0,0,0,0); reply("OK: rainbow"); }
 
   else if (cmd == "bright") {
     int n = constrain(rest.toInt(), 0, 255);
-    strip.setBrightness(n); strip.show();
+    strip.setBrightness(n); showStrip();
     reply("OK: brightness=" + String(n));
   }
   else if (cmd == "count") {
     activeLeds = constrain(rest.toInt(), 1, MAX_LEDS);
+    pIndex = constrain(pIndex, 0, activeLeds - 1);
+    for (int i = activeLeds; i < MAX_LEDS; i++) strip.setPixelColor(i, 0);
+    showStrip();
     reply("OK: active_leds=" + String(activeLeds));
   }
   else if (cmd == "fill") {
@@ -280,7 +334,7 @@ void handleCommand(String line) {
     if (sscanf(rest.c_str(), "%d %d %d %d", &i,&r,&g,&b) == 4 && i>=0 && i<MAX_LEDS) {
       mode = M_STATIC;
       strip.setPixelColor(i, strip.Color(constrain(r,0,255),constrain(g,0,255),constrain(b,0,255)));
-      strip.show(); ledsOn = true; reply("OK: led " + String(i));
+      showStrip(); ledsOn = true; reply("OK: led " + String(i));
     } else reply("ERR: usage 'led I R G B'");
   }
   else if (cmd == "speed") {
@@ -313,180 +367,183 @@ void handleCommand(String line) {
   else { reply("ERR: unknown '" + cmd + "' (type help)"); }
 }
 
+};
+
+LedChannel channels[CHANNEL_COUNT] = {
+  {1, CHANNEL_PINS[0]},
+  {2, CHANNEL_PINS[1]},
+  {3, CHANNEL_PINS[2]}
+};
+int serialChannel = 0;
+
+void handleSerialCommand(String line) {
+  line.trim();
+  if (line.startsWith("channel ")) {
+    String value = line.substring(8);
+    value.trim();
+    if (value != "1" && value != "2" && value != "3") {
+      reply("ERR: usage 'channel 1|2|3'");
+      return;
+    }
+    serialChannel = value.toInt() - 1;
+    channels[serialChannel].printStatus();
+    return;
+  }
+  channels[serialChannel].handleManualCommand(line);
+}
+
 // ---------- the control webpage (served from flash) ----------
 static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>ESP32 LEDs</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 — Independent LED Strips</title>
 <style>
-  :root { --bg:#101318; --card:#1a1f27; --edge:#2a3140; --text:#e8ecf2; --dim:#8b95a5; --accent:#4c8dff; }
-  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); }
-  .wrap { max-width:440px; margin:0 auto; padding:14px 14px 40px; }
-  h1 { font-size:19px; margin:8px 2px 2px; }
-  #stat { font-size:12px; color:var(--dim); margin:0 2px 12px; min-height:15px; word-break:break-all; }
-  .card { background:var(--card); border:1px solid var(--edge); border-radius:14px; padding:14px; margin-bottom:12px; }
-  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:0 0 10px; font-weight:600; }
-  .row { display:flex; gap:8px; flex-wrap:wrap; }
-  button { flex:1; min-width:70px; padding:12px 8px; border-radius:10px; border:1px solid var(--edge);
-           background:#232a35; color:var(--text); font-size:14px; font-weight:500; cursor:pointer; }
-  button:active { background:var(--accent); border-color:var(--accent); }
-  .swatches { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
-  .sw { height:42px; border-radius:10px; border:1px solid var(--edge); cursor:pointer; }
-  .sliderrow { display:flex; align-items:center; gap:10px; margin-top:4px; }
-  .sliderrow label { width:70px; font-size:13px; color:var(--dim); }
-  .sliderrow output { width:38px; text-align:right; font-size:13px; }
-  input[type=range] { flex:1; accent-color:var(--accent); }
-  input[type=color] { width:100%; height:46px; border:1px solid var(--edge); border-radius:10px;
-                      background:#232a35; padding:4px; margin-top:8px; }
-  .cmdrow { display:flex; gap:8px; }
-  .cmdrow input { flex:1; padding:11px 12px; border-radius:10px; border:1px solid var(--edge);
-                  background:#232a35; color:var(--text); font-size:14px; }
-  .cmdrow button { flex:0 0 64px; }
-  #log { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; color:#9fd48f;
-         background:#12161c; border:1px solid var(--edge); border-radius:10px; padding:10px;
-         margin-top:10px; min-height:56px; max-height:150px; overflow-y:auto; white-space:pre-wrap; }
+* { box-sizing:border-box; }
+body { margin:0; padding:18px; background:#101318; color:#e8ecf2; font-family:system-ui,sans-serif; }
+main { max-width:1200px; margin:auto; }
+h1 { font-size:24px; } h2 { margin:0 0 6px; font-size:20px; }
+p, .status { color:#adb7c7; }
+#strips { display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:16px; }
+.strip { padding:18px; border:1px solid #354155; border-radius:14px; background:#1a1f27; min-width:0; }
+.status { font-size:12px; min-height:64px; overflow-wrap:anywhere; }
+.row { display:flex; flex-wrap:wrap; gap:7px; margin:10px 0; }
+button, input { font:inherit; border:1px solid #45536b; border-radius:8px; background:#232a35; color:inherit; padding:9px; min-width:0; }
+button { cursor:pointer; flex:1; } button:active { background:#315a98; }
+label { display:block; margin-top:15px; font-size:14px; }
+input[type=range] { width:100%; padding:0; accent-color:#4c8dff; }
+input[type=color] { width:100%; height:42px; margin-top:6px; }
+input[type=number] { width:85px; }
+.command { width:100%; }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:150px; overflow:auto; font-size:12px; color:#a9dc98; }
 </style>
 </head>
-<body>
-<div class="wrap">
-  <h1>ESP32 LED Strip</h1>
-  <div id="stat">connecting&hellip;</div>
-
-  <div class="card">
-    <h2>Power</h2>
+<body><main>
+<h1>Independent LED Strips</h1>
+<p>Each panel controls only its labeled GPIO pin. Patterns on other strips keep running.</p>
+<div id="strips"></div>
+<template id="strip-template">
+  <section class="strip">
+    <h2></h2><div class="status" aria-live="polite">Connecting…</div>
     <div class="row">
-      <button onclick="cmd('on')">On</button>
-      <button onclick="cmd('off')">Off</button>
-      <button onclick="cmd('toggle')">Toggle</button>
-      <button onclick="cmd('stop')">Stop</button>
+      <button data-command="on">On</button><button data-command="off">Off</button>
+      <button data-command="toggle">Toggle</button><button data-command="stop">Stop</button>
     </div>
-  </div>
-
-  <div class="card">
-    <h2>Color</h2>
-    <div class="swatches">
-      <div class="sw" style="background:#f00"    onclick="cmd('fill red')"></div>
-      <div class="sw" style="background:#0f0"    onclick="cmd('fill green')"></div>
-      <div class="sw" style="background:#00f"    onclick="cmd('fill blue')"></div>
-      <div class="sw" style="background:#ff0"    onclick="cmd('fill yellow')"></div>
-      <div class="sw" style="background:#0ff"    onclick="cmd('fill cyan')"></div>
-      <div class="sw" style="background:#f0f"    onclick="cmd('fill magenta')"></div>
-      <div class="sw" style="background:#ff6400" onclick="cmd('fill orange')"></div>
-      <div class="sw" style="background:#9600ff" onclick="cmd('fill purple')"></div>
-      <div class="sw" style="background:#fff"    onclick="cmd('fill white')"></div>
-      <div class="sw" style="background:#000"    onclick="cmd('fill off')"></div>
-    </div>
-    <input type="color" id="pick" value="#4c8dff">
-  </div>
-
-  <div class="card">
-    <h2>Patterns</h2>
+    <label>Color<input class="color" type="color" value="#4c8dff"></label>
     <div class="row">
-      <button onclick="pat('pulse')">Pulse</button>
-      <button onclick="pat('wipe')">Wipe</button>
-      <button onclick="pat('chase')">Chase</button>
-      <button onclick="cmd('rainbow')">Rainbow</button>
+      <button data-command="fill red">Red</button><button data-command="fill green">Green</button>
+      <button data-command="fill blue">Blue</button><button data-command="fill white">White</button>
     </div>
-    <div class="row" style="margin-top:8px">
-      <button onclick="cmd('dir fwd')">Dir &#8594;</button>
-      <button onclick="cmd('dir rev')">Dir &#8592;</button>
-      <button onclick="cmd('dir flip')">Flip</button>
+    <div class="row">
+      <button data-pattern="pulse">Pulse</button><button data-pattern="wipe">Wipe</button>
+      <button data-pattern="chase">Chase</button><button data-command="rainbow">Rainbow</button>
     </div>
-  </div>
-
-  <div class="card">
-    <h2>Levels</h2>
-    <div class="sliderrow">
-      <label>Brightness</label>
-      <input type="range" id="bri" min="0" max="255" value="60">
-      <output id="briv">60</output>
+    <div class="row">
+      <button data-command="dir fwd">Forward</button><button data-command="dir rev">Reverse</button>
     </div>
-    <div class="sliderrow">
-      <label>Speed</label>
-      <input type="range" id="spd" min="5" max="400" value="40">
-      <output id="spdv">40</output>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Command</h2>
-    <div class="cmdrow">
-      <input id="ci" placeholder="e.g. chase 255 0 0 30, or: help" autocomplete="off">
-      <button onclick="sendBox()">Send</button>
-    </div>
-    <div id="log"></div>
-  </div>
-</div>
-
+    <label>Brightness <output class="brightness-value">60</output>
+      <input class="brightness" type="range" min="0" max="255" value="60">
+    </label>
+    <label>Speed (ms) <output class="speed-value">40</output>
+      <input class="speed" type="range" min="5" max="2000" value="40">
+    </label>
+    <label>LED count <input class="count" type="number" min="1" max="181" value="181"></label>
+    <label>Command or script<input class="command" placeholder="e.g. chase 255 0 0 30" autocomplete="off"></label>
+    <div class="row"><button class="send">Send</button></div>
+    <pre class="log" aria-live="polite"></pre>
+  </section>
+</template>
 <script>
-var log = document.getElementById('log');
-var stat = document.getElementById('stat');
-
-function addLog(s) {
-  log.textContent += s;
-  if (log.textContent.length > 4000) log.textContent = log.textContent.slice(-4000);
-  log.scrollTop = log.scrollHeight;
+function rgb(hex) {
+  return [1,3,5].map(function(i){ return parseInt(hex.slice(i,i+2),16); }).join(' ');
 }
 
-function cmd(c, quiet) {
-  return fetch('/cmd?c=' + encodeURIComponent(c))
-    .then(function(r){ return r.text(); })
-    .then(function(t){ if (!quiet) addLog('> ' + c + '\n' + t); return t; })
-    .catch(function(){ if (!quiet) addLog('> ' + c + '\n(no response)\n'); });
-}
-
-function hexRgb(h) {
-  return parseInt(h.substr(1,2),16) + ' ' + parseInt(h.substr(3,2),16) + ' ' + parseInt(h.substr(5,2),16);
-}
-
-function pat(name) { cmd(name + ' ' + hexRgb(document.getElementById('pick').value)); }
-
-document.getElementById('pick').addEventListener('input', debounce(function(e){
-  cmd('color ' + hexRgb(e.target.value), true);
-}, 120));
-
-function bindSlider(id, out, make) {
-  var el = document.getElementById(id), ov = document.getElementById(out);
-  el.addEventListener('input', function(){ ov.textContent = el.value; });
-  el.addEventListener('input', debounce(function(){ cmd(make(el.value), true); }, 150));
-}
-bindSlider('bri', 'briv', function(v){ return 'bright ' + v; });
-bindSlider('spd', 'spdv', function(v){ return 'speed ' + v; });
-
-function debounce(fn, ms) {
-  var t; return function(){ var a=arguments, s=this;
-    clearTimeout(t); t=setTimeout(function(){ fn.apply(s,a); }, ms); };
-}
-
-var ci = document.getElementById('ci');
-function sendBox(){ if (ci.value.trim()) { cmd(ci.value.trim()); ci.value=''; } }
-ci.addEventListener('keydown', function(e){ if (e.key==='Enter') sendBox(); });
-
-function poll() {
-  cmd('status', true).then(function(t){
-    if (t) stat.textContent = t.trim();
+function mountStrip(channel, pin) {
+  var panel = document.getElementById('strip-template').content.firstElementChild.cloneNode(true);
+  document.getElementById('strips').appendChild(panel);
+  panel.querySelector('h2').textContent = 'Strip ' + channel + ' · GPIO ' + pin;
+  var status = panel.querySelector('.status'), log = panel.querySelector('.log');
+  // Each panel captures an immutable channel and has its own ordered request queue.
+  var queue = Promise.resolve();
+  function send(command, quiet) {
+    queue = queue.then(function(){
+      return fetch('/cmd?channel=' + channel + '&c=' + encodeURIComponent(command), {cache:'no-store'})
+        .then(function(response){
+          return response.text().then(function(text){
+            if (!response.ok) throw new Error(text);
+            if (!quiet) {
+              log.textContent = (log.textContent + '> ' + command + '\n' + text).slice(-2000);
+              log.scrollTop = log.scrollHeight;
+            }
+            if (command === 'status') status.textContent = text.trim();
+            return text;
+          });
+        });
+    }).catch(function(error){ status.textContent = 'Request failed: ' + error.message; });
+    return queue;
+  }
+  panel.querySelectorAll('[data-command]').forEach(function(button){
+    button.addEventListener('click', function(){ send(button.dataset.command); });
   });
+  panel.querySelectorAll('[data-pattern]').forEach(function(button){
+    button.addEventListener('click', function(){ send(button.dataset.pattern + ' ' + rgb(panel.querySelector('.color').value)); });
+  });
+  panel.querySelector('.color').addEventListener('change', function(event){ send('color ' + rgb(event.target.value)); });
+  [['brightness','bright'],['speed','speed']].forEach(function(pair){
+    var input = panel.querySelector('.' + pair[0]), output = panel.querySelector('.' + pair[0] + '-value');
+    input.addEventListener('input', function(){ output.textContent = input.value; });
+    input.addEventListener('change', function(){ send(pair[1] + ' ' + input.value); });
+  });
+  panel.querySelector('.count').addEventListener('change', function(event){
+    if (event.target.checkValidity()) send('count ' + event.target.value);
+  });
+  var input = panel.querySelector('.command');
+  function sendBox() { if (input.value.trim()) { send(input.value.trim()); input.value = ''; } }
+  panel.querySelector('.send').addEventListener('click', sendBox);
+  input.addEventListener('keydown', function(event){ if (event.key === 'Enter') sendBox(); });
+  // Initialize controls once; polling must not overwrite a user's pending input.
+  send('status', true).then(function(text){
+    if (!text) return;
+    [['brightness','brightness'],['speed','speed'],['count','active_leds']].forEach(function(pair){
+      var match = text.match(new RegExp(pair[1] + '=(\\d+)'));
+      if (match) {
+        var control = panel.querySelector('.' + pair[0]);
+        if (document.activeElement !== control) {
+          control.value = match[1];
+          var output = panel.querySelector('.' + pair[0] + '-value');
+          if (output) output.textContent = match[1];
+        }
+      }
+    });
+  });
+  // Schedule after completion so a disconnected board cannot accumulate polls.
+  function poll() { send('status', true).then(function(){ setTimeout(poll, 3000); }); }
+  setTimeout(poll, 3000);
 }
-poll();
-setInterval(poll, 3000);
+[16,17,18].forEach(function(pin, index){ mountStrip(index + 1, pin); });
 </script>
-</body>
-</html>
+</main></body></html>
 )HTML";
 
 // ---------- web server & captive portal ----------
 void handleRoot() {
+  server.sendHeader("Cache-Control", "no-store");
   server.send_P(200, "text/html", INDEX_HTML);
 }
 
 void handleCmd() {
+  String value = server.arg("channel");
+  if (value != "1" && value != "2" && value != "3") {
+    server.send(400, "text/plain", "ERR: channel must be 1, 2, or 3");
+    return;
+  }
   String out;
   webReply = &out;
-  handleCommand(server.arg("c"));
+  reply("Channel " + value + " / GPIO " + String(CHANNEL_PINS[value.toInt() - 1]));
+  channels[value.toInt() - 1].handleManualCommand(server.arg("c"));
   webReply = nullptr;
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "text/plain", out.length() ? out : "OK");
 }
 
@@ -514,9 +571,7 @@ void setupWifi() {
 
 void setup() {
   Serial.begin(115200);
-  strip.begin();
-  strip.setBrightness(60);
-  strip.show();
+  for (int i = 0; i < CHANNEL_COUNT; i++) channels[i].begin();
   setupWifi();
   delay(200);
   reply(String("WS2812 Wi-Fi control ready. Join Wi-Fi '") + AP_SSID +
@@ -528,7 +583,7 @@ void loop() {
   static String sbuf;
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == '\n' || c == '\r') { if (sbuf.length()) { handleCommand(sbuf); sbuf=""; } }
+    if (c == '\n' || c == '\r') { if (sbuf.length()) { handleSerialCommand(sbuf); sbuf=""; } }
     else sbuf += c;
   }
 
@@ -537,6 +592,12 @@ void loop() {
   server.handleClient();
 
   // 3) run animations & scripts
-  runPatterns();
-  runScript();
+  for (int i = 0; i < CHANNEL_COUNT; i++) {
+    channels[i].runPatterns();
+    channels[i].runScript();
+  }
+  // Start each ready transmitter without waiting on another strip. An active
+  // transmitter keeps its own snapshot until the hardware reports completion.
+  for (int i = 0; i < CHANNEL_COUNT; i++)
+    channels[i].output.service(channels[i].strip.getPixels());
 }

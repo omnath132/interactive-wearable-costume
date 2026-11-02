@@ -1,0 +1,156 @@
+{
+  "limit": 256,
+  "strips": [
+    {
+      "name": "Left arm",
+      "pin": 16,
+      "length": 118,
+      "ready": true
+    },
+    {
+      "name": "Right arm",
+      "pin": 17,
+      "length": 124,
+      "ready": true
+    },
+    {
+      "name": "Left leg",
+      "pin": 32,
+      "length": 70,
+      "ready": true
+    },
+    {
+      "name": "Right leg",
+      "pin": 33,
+      "length": 70,
+      "ready": true
+    },
+    {
+      "name": "Spine",
+      "pin": 4,
+      "length": 97,
+      "ready": true
+    },
+    {
+      "name": "Heart",
+      "pin": 18,
+      "length": 18,
+      "ready": true
+    }
+  ],
+  "records": [
+    {
+      "slot": 0,
+      "name": "right 0 118-122",
+      "strip": 1,
+      "first": 118,
+      "last": 122
+    },
+    {
+      "slot": 1,
+      "name": "right 1",
+      "strip": 1,
+      "first": 111,
+      "last": 114
+    },
+    {
+      "slot": 2,
+      "name": "right 2",
+      "strip": 1,
+      "first": 105,
+      "last": 108
+    },
+    {
+      "slot": 3,
+      "name": "right 3",
+      "strip": 1,
+      "first": 98,
+      "last": 101
+    },
+    {
+      "slot": 4,
+      "name": "right 4",
+      "strip": 1,
+      "first": 91,
+      "last": 94
+    },
+    {
+      "slot": 5,
+      "name": "right 9",
+      "strip": 1,
+      "first": 62,
+      "last": 66
+    },
+    {
+      "slot": 6,
+      "name": "right 10",
+      "strip": 1,
+      "first": 52,
+      "last": 56
+    },
+    {
+      "slot": 7,
+      "name": "right 11",
+      "strip": 1,
+      "first": 44,
+      "last": 48
+    },
+    {
+      "slot": 8,
+      "name": "left 0",
+      "strip": 0,
+      "first": 115,
+      "last": 118
+    },
+    {
+      "slot": 9,
+      "name": "left 1",
+      "strip": 0,
+      "first": 108,
+      "last": 111
+    },
+    {
+      "slot": 10,
+      "name": "left 2",
+      "strip": 0,
+      "first": 103,
+      "last": 106
+    },
+    {
+      "slot": 11,
+      "name": "left 3",
+      "strip": 0,
+      "first": 98,
+      "last": 101
+    },
+    {
+      "slot": 12,
+      "name": "left 4",
+      "strip": 0,
+      "first": 91,
+      "last": 95
+    },
+    {
+      "slot": 13,
+      "name": "left 7",
+      "strip": 0,
+      "first": 67,
+      "last": 71
+    },
+    {
+      "slot": 14,
+      "name": "left 10",
+      "strip": 0,
+      "first": 49,
+      "last": 54
+    },
+    {
+      "slot": 15,
+      "name": "left 11",
+      "strip": 0,
+      "first": 41,
+      "last": 46
+    }
+  ],
+  "numbering": "1-based inclusive, from data input"
+}

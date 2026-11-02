@@ -23,8 +23,8 @@
 
 #include <Wire.h>
 
-#define SDA_PIN   21
-#define SCL_PIN   22
+#define SDA_PIN   22
+#define SCL_PIN   21
 #define I2C_HZ    100000    // 100 kHz - the safe speed for scanning
 #define SCAN_MS   3000      // rescan interval
 
